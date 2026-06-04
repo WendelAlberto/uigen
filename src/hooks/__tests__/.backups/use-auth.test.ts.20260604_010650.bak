@@ -1,0 +1,293 @@
+import { renderHook, act, waitFor } from "@testing-library/react";
+import { useRouter } from "next/navigation";
+import { useAuth } from "../use-auth";
+import * as actions from "@/actions";
+import * as anonTracker from "@/lib/anon-work-tracker";
+
+// Mock Next.js router
+vi.mock("next/navigation", () => ({
+  useRouter: vi.fn(),
+}));
+
+// Mock server actions
+vi.mock("@/actions", () => ({
+  signIn: vi.fn(),
+  signUp: vi.fn(),
+  getProjects: vi.fn(),
+  createProject: vi.fn(),
+}));
+
+// Mock anonymous work tracker
+vi.mock("@/lib/anon-work-tracker", () => ({
+  getAnonWorkData: vi.fn(),
+  clearAnonWork: vi.fn(),
+}));
+
+describe("useAuth", () => {
+  const mockRouter = {
+    push: vi.fn(),
+  };
+
+  const mockProject = {
+    id: "proj-123",
+    name: "Test Project",
+    messages: [],
+    data: {},
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (useRouter as any).mockReturnValue(mockRouter);
+  });
+
+  describe("signIn", () => {
+    it("deve fazer sign in com sucesso e redirecionar", async () => {
+      (actions.signIn as any).mockResolvedValue({ success: true });
+      (anonTracker.getAnonWorkData as any).mockReturnValue(null);
+      (actions.getProjects as any).mockResolvedValue([mockProject]);
+
+      const { result } = renderHook(() => useAuth());
+
+      let signInResult;
+      await act(async () => {
+        signInResult = await result.current.signIn("test@example.com", "password123");
+      });
+
+      expect(signInResult).toEqual({ success: true });
+      expect(mockRouter.push).toHaveBeenCalledWith("/proj-123");
+    });
+
+    it("deve preservar trabalho anônimo após sign in", async () => {
+      const anonWork = {
+        messages: [{ role: "user", content: "Criar componente" }],
+        fileSystemData: { "/components/Button.jsx": { content: "export default Button" } },
+      };
+
+      (actions.signIn as any).mockResolvedValue({ success: true });
+      (anonTracker.getAnonWorkData as any).mockReturnValue(anonWork);
+      (actions.createProject as any).mockResolvedValue({
+        ...mockProject,
+        messages: anonWork.messages,
+        data: anonWork.fileSystemData,
+      });
+
+      const { result } = renderHook(() => useAuth());
+
+      await act(async () => {
+        await result.current.signIn("test@example.com", "password123");
+      });
+
+      expect(actions.createProject).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: anonWork.messages,
+          data: anonWork.fileSystemData,
+        })
+      );
+      expect(anonTracker.clearAnonWork).toHaveBeenCalled();
+      expect(mockRouter.push).toHaveBeenCalledWith("/proj-123");
+    });
+
+    it("deve criar novo projeto se não houver projetos existentes", async () => {
+      (actions.signIn as any).mockResolvedValue({ success: true });
+      (anonTracker.getAnonWorkData as any).mockReturnValue(null);
+      (actions.getProjects as any).mockResolvedValue([]);
+      (actions.createProject as any).mockResolvedValue(mockProject);
+
+      const { result } = renderHook(() => useAuth());
+
+      await act(async () => {
+        await result.current.signIn("test@example.com", "password123");
+      });
+
+      expect(actions.createProject).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: expect.stringMatching(/^New Design #\d+$/),
+          messages: [],
+          data: {},
+        })
+      );
+      expect(mockRouter.push).toHaveBeenCalledWith("/proj-123");
+    });
+
+    it("não deve redirecionar se sign in falhar", async () => {
+      (actions.signIn as any).mockResolvedValue({ success: false, error: "Credenciais inválidas" });
+
+      const { result } = renderHook(() => useAuth());
+
+      let signInResult;
+      await act(async () => {
+        signInResult = await result.current.signIn("test@example.com", "wrongpassword");
+      });
+
+      expect(signInResult).toEqual({ success: false, error: "Credenciais inválidas" });
+      expect(mockRouter.push).not.toHaveBeenCalled();
+    });
+
+    it("deve gerenciar estado de loading durante sign in", async () => {
+      (actions.signIn as any).mockResolvedValue({ success: true });
+      (anonTracker.getAnonWorkData as any).mockReturnValue(null);
+      (actions.getProjects as any).mockResolvedValue([mockProject]);
+
+      const { result } = renderHook(() => useAuth());
+
+      expect(result.current.isLoading).toBe(false);
+
+      act(() => {
+        // Iniciar sign in
+        result.current.signIn("test@example.com", "password123");
+      });
+
+      // Estado de loading deve ser true durante operação async
+      // (verificar após await)
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+      });
+    });
+  });
+
+  describe("signUp", () => {
+    it("deve fazer sign up com sucesso e redirecionar", async () => {
+      (actions.signUp as any).mockResolvedValue({ success: true });
+      (anonTracker.getAnonWorkData as any).mockReturnValue(null);
+      (actions.getProjects as any).mockResolvedValue([]);
+      (actions.createProject as any).mockResolvedValue(mockProject);
+
+      const { result } = renderHook(() => useAuth());
+
+      let signUpResult;
+      await act(async () => {
+        signUpResult = await result.current.signUp("newuser@example.com", "password123");
+      });
+
+      expect(signUpResult).toEqual({ success: true });
+      expect(mockRouter.push).toHaveBeenCalledWith("/proj-123");
+    });
+
+    it("não deve redirecionar se sign up falhar", async () => {
+      (actions.signUp as any).mockResolvedValue({ success: false, error: "Email já existe" });
+
+      const { result } = renderHook(() => useAuth());
+
+      let signUpResult;
+      await act(async () => {
+        signUpResult = await result.current.signUp("existing@example.com", "password123");
+      });
+
+      expect(signUpResult).toEqual({ success: false, error: "Email já existe" });
+      expect(mockRouter.push).not.toHaveBeenCalled();
+    });
+
+    it("deve preservar trabalho anônimo após sign up", async () => {
+      const anonWork = {
+        messages: [{ role: "user", content: "Criar formulário" }],
+        fileSystemData: { "/components/Form.jsx": { content: "export default Form" } },
+      };
+
+      (actions.signUp as any).mockResolvedValue({ success: true });
+      (anonTracker.getAnonWorkData as any).mockReturnValue(anonWork);
+      (actions.createProject as any).mockResolvedValue({
+        ...mockProject,
+        messages: anonWork.messages,
+        data: anonWork.fileSystemData,
+      });
+
+      const { result } = renderHook(() => useAuth());
+
+      await act(async () => {
+        await result.current.signUp("newuser@example.com", "password123");
+      });
+
+      expect(actions.createProject).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: anonWork.messages,
+          data: anonWork.fileSystemData,
+        })
+      );
+      expect(anonTracker.clearAnonWork).toHaveBeenCalled();
+    });
+  });
+
+  describe("handlePostSignIn logic", () => {
+    it("prioriza trabalho anônimo sobre projetos existentes", async () => {
+      const anonWork = {
+        messages: [{ role: "user", content: "Componente prioritário" }],
+        fileSystemData: {},
+      };
+
+      const existingProject = { ...mockProject, name: "Projeto Existente" };
+
+      (actions.signIn as any).mockResolvedValue({ success: true });
+      (anonTracker.getAnonWorkData as any).mockReturnValue(anonWork);
+      (actions.createProject as any).mockResolvedValue({
+        ...mockProject,
+        name: `Design from ${new Date().toLocaleTimeString()}`,
+      });
+      (actions.getProjects as any).mockResolvedValue([existingProject]);
+
+      const { result } = renderHook(() => useAuth());
+
+      await act(async () => {
+        await result.current.signIn("test@example.com", "password123");
+      });
+
+      // Deve criar novo projeto com trabalho anônimo, não usar o existente
+      expect(actions.createProject).toHaveBeenCalled();
+      expect(actions.getProjects).not.toHaveBeenCalled();
+    });
+
+    it("usa projeto existente quando não há trabalho anônimo", async () => {
+      const existingProject = { ...mockProject, name: "Projeto Existente" };
+
+      (actions.signIn as any).mockResolvedValue({ success: true });
+      (anonTracker.getAnonWorkData as any).mockReturnValue(null);
+      (actions.getProjects as any).mockResolvedValue([existingProject]);
+
+      const { result } = renderHook(() => useAuth());
+
+      await act(async () => {
+        await result.current.signIn("test@example.com", "password123");
+      });
+
+      expect(actions.getProjects).toHaveBeenCalled();
+      expect(actions.createProject).not.toHaveBeenCalled();
+      expect(mockRouter.push).toHaveBeenCalledWith("/proj-123");
+    });
+  });
+
+  describe("error handling", () => {
+    it("deve resetar loading state em caso de erro", async () => {
+      (actions.signIn as any).mockRejectedValue(new Error("Network error"));
+
+      const { result } = renderHook(() => useAuth());
+
+      await act(async () => {
+        try {
+          await result.current.signIn("test@example.com", "password123");
+        } catch {
+          // Erro esperado
+        }
+      });
+
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    it("deve lidar com falha em createProject após sign in bem-sucedido", async () => {
+      (actions.signIn as any).mockResolvedValue({ success: true });
+      (anonTracker.getAnonWorkData as any).mockReturnValue(null);
+      (actions.getProjects as any).mockResolvedValue([]);
+      (actions.createProject as any).mockRejectedValue(new Error("BD error"));
+
+      const { result } = renderHook(() => useAuth());
+
+      await expect(
+        act(async () => {
+          await result.current.signIn("test@example.com", "password123");
+        })
+      ).rejects.toThrow("BD error");
+
+      expect(result.current.isLoading).toBe(false);
+    });
+  });
+});

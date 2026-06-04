@@ -1,0 +1,192 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+**UIGen** is an AI-powered React component generator. Users describe components in a chat, and Claude generates React code in real-time, displayed in a live preview. The app uses a virtual file system abstraction (no disk writes), persists projects to SQLite, and integrates with Anthropic's Claude API (or a mock provider for demos).
+
+## Quick Commands
+
+```bash
+# Setup (install deps, generate Prisma, run migrations)
+npm run setup
+
+# Development (runs on port 3000, or next available if in use)
+npm run dev
+npm run dev:daemon     # Daemon mode, logs to logs.txt
+
+# Build & Deploy
+npm build
+npm start
+
+# Testing
+npm test               # Run all tests (Vitest + jsdom)
+npm test -- <file>    # Run single test file
+
+# Code quality
+npm run lint
+
+# Database
+npx prisma studio    # Open Prisma Studio GUI
+npx prisma migrate dev --name <name>  # Create new migration
+npm run db:reset      # Wipe and reinit database
+```
+
+## Architecture
+
+### High-Level Flow
+
+1. **Pages & Layout** (`src/app/`)
+   - `/` — Home page (auth check, redirects to most recent project or anonymous mode)
+   - `/[projectId]` — Project page (fetch project data, pass to MainContent)
+   - `main-content.tsx` — Main UI container; manages Preview/Code tabs and splits layout
+
+2. **Chat & Generation** (`src/app/api/chat/route.ts`)
+   - POST endpoint that receives user messages + file state
+   - Calls Vercel AI SDK's `streamText()` with Claude (Anthropic) or mock provider
+   - Tools: `str_replace_editor` (edit file content), `file_manager` (create/delete/rename)
+   - Streams response back; on finish, saves project to DB if authenticated
+
+3. **Virtual File System** (`src/lib/file-system.ts`)
+   - `VirtualFileSystem` class: in-memory tree structure for component files
+   - Methods: `createFile`, `readFile`, `deleteFile`, `renameFile`, `getAllFiles`
+   - Serializes to/from plain objects for DB storage and React context
+   - Used by chat route and UI to stay in sync
+
+4. **React Contexts** (`src/lib/contexts/`)
+   - **FileSystemContext** — holds VirtualFileSystem instance, selected file, refresh trigger
+   - **ChatContext** — holds chat messages, project ID, handles message streaming
+
+5. **Components** (`src/components/`)
+   - `chat/ChatInterface` — Message list + input, handles streaming
+   - `chat/MarkdownRenderer` — Renders markdown with syntax highlighting
+   - `editor/CodeEditor` — Monaco editor for browsing/editing generated code
+   - `editor/FileTree` — Directory tree sidebar
+   - `preview/PreviewFrame` — Live iframe that renders component via @babel/standalone
+   - `auth/` — Sign in / Sign up forms, JWT token exchange
+
+6. **Data & Auth**
+   - **Prisma** (SQLite) — User (email, password hash) and Project (messages, file data as JSON)
+   - **Auth** (`src/lib/auth.ts`) — JWT token in httpOnly cookie, 7-day expiry
+   - **Middleware** (`src/middleware.ts`) — Session verification
+
+### Key Design Decisions
+
+**Virtual File System over Disk:**
+- All generated code stays in memory or serialized in DB; no file writes to disk
+- Keeps project state portable and isolated
+- Serializes to simple object format for storage/transmission
+
+**Mock Provider Fallback:**
+- If `ANTHROPIC_API_KEY` is not set, `MockLanguageModel` returns canned demo responses
+- Lets users demo the UI without needing a real API key
+- Mock generates tool calls to show the interaction pattern
+
+**Component Generation via Tool Use:**
+- Claude doesn't generate code as plain text; instead uses `str_replace_editor` and `file_manager` tools
+- Allows Claude to iteratively refine files, create new ones, see tool feedback
+- `maxSteps` reduced for mock (4 steps) vs. real Claude (40 steps) to avoid repetitive loops
+
+**Streaming UI Updates:**
+- `streamText()` from Vercel AI yields text-deltas and tool-calls in real-time
+- Client receives stream, updates chat messages and file system as stream progresses
+- Gives impression of live code generation
+
+## File Organization
+
+```
+src/
+├── app/                           # Next.js App Router pages
+│   ├── layout.tsx
+│   ├── page.tsx                   # Home / auth redirect
+│   ├── [projectId]/page.tsx       # Project view
+│   ├── main-content.tsx           # Layout & tabs logic
+│   └── api/chat/route.ts          # Chat streaming endpoint
+├── components/                    # React components
+│   ├── auth/                      # Sign in/up forms
+│   ├── chat/                      # Chat UI, message list
+│   ├── editor/                    # Code editor, file tree
+│   ├── preview/                   # Preview iframe
+│   └── ui/                        # Radix UI primitives
+├── lib/                           # Core logic
+│   ├── contexts/                  # React contexts (chat, file system)
+│   ├── tools/                     # AI tool definitions (str_replace, file_manager)
+│   ├── transform/                 # JSX transpilation utils
+│   ├── file-system.ts             # Virtual file system class
+│   ├── auth.ts                    # JWT session management
+│   ├── provider.ts                # LLM provider (Anthropic or mock)
+│   ├── prisma.ts                  # Prisma client singleton
+│   └── prompts/                   # System prompts for Claude
+├── actions/                       # Server actions for auth, project CRUD
+├── hooks/                         # React hooks (e.g., useAuth)
+└── middleware.ts                  # Next.js middleware
+
+prisma/
+├── schema.prisma                  # User & Project models
+└── migrations/                    # DB version history
+```
+
+## Important Patterns
+
+### Adding a New Feature
+
+1. **Server-side logic**: Server action in `src/actions/` or API route in `src/app/api/`
+2. **Context state**: Add to ChatContext or FileSystemContext if it's shared UI state
+3. **UI**: React component in `src/components/`, use context hooks
+4. **Tests**: Colocate tests in `__tests__/` folder next to component
+
+### Modifying the Generation Prompt
+
+- System prompt is in `src/lib/prompts/generation.tsx`
+- Sent with every chat request (with `cacheControl: ephemeral` for prompt caching)
+- Include tool definitions here if adding new tools
+
+### Adding a New Tool
+
+1. Define tool in `src/lib/tools/<name>.ts` (export a `build<Name>Tool` function)
+2. Add to `tools` object in `src/app/api/chat/route.ts`
+3. Update generation prompt with tool description
+4. Tool receives VirtualFileSystem instance, can modify files
+
+### Testing
+
+- **Unit tests**: Vitest + @testing-library
+- **File**: `__tests__/<component>.test.tsx` next to component
+- **jsdom environment**: Configured in `vitest.config.mts`
+- Run: `npm test -- --run` (single run) or `npm test` (watch mode)
+
+## Database
+
+**Models:**
+- `User`: id (CUID), email (unique), password (bcrypt hash), createdAt, updatedAt
+- `Project`: id (CUID), name, userId (optional for anon projects), messages (JSON string), data (JSON string), createdAt, updatedAt
+
+**Migrations:**
+- Located in `prisma/migrations/`
+- Run on startup via `npm run setup`
+- To add a migration: `npx prisma migrate dev --name <description>`
+- To reset: `npm run db:reset` (deletes data; only for dev)
+
+## Environment Variables
+
+```
+JWT_SECRET=<secret-key>                    # For JWT signing (required in production)
+ANTHROPIC_API_KEY=sk-ant-...               # Optional; if not set, uses mock provider
+NODE_ENV=development|production            # Defaults to development
+```
+
+## Known Issues & Warnings
+
+1. **`npm audit fix` is not recommended** — dependencies are pinned for compatibility; audit fix may break the app
+2. **next.config.ts turbopack warning** — `root` option may not be recognized in some Next.js versions; safe to ignore
+3. **Port 3000 in use** — dev server auto-selects next available port (e.g., 3002)
+4. **Mock provider repetition** — `maxSteps` is lower (4) for mock to avoid lengthy loops; real Claude uses 40 steps
+
+## Debugging Tips
+
+- **Check streaming errors**: Look at browser console and server logs for streaming failures
+- **File system sync issues**: Compare FileSystemContext state with chat messages in Redux/DevTools
+- **Auth redirects**: Verify JWT is being set/read correctly in `src/lib/auth.ts`
+- **Preview rendering fails**: Check if component has syntax errors; Babel transpiler will fail silently if JSX is invalid
+- **Database issues**: Run `npx prisma studio` to inspect current state, or `npm run db:reset` to start fresh
